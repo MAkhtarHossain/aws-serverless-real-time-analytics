@@ -1,0 +1,350 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Real-Time Analytic using Kinesis Analytic. 
+  **WARNING** This template creates an Kinesis Data Stream, a Kinesis Analytics, Kinesis Firehose Delivery Stream, Lambda Function, an SNS Topic and an S3 bucket
+  You will be billed for the AWS resources used if you create a stack from this template.
+  Copyright [2015-2017] Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  Licensed under the Apache License, Version 2.0 (the "License").
+  You may not use this file except in compliance with the License.
+  A copy of the License is located at http://aws.amazon.com/apache2.0/ or in the "license"
+  file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+  for the specific language governing permissions and limitations under the License.
+
+Parameters:
+  ProcessedDataBucketName:
+    Description: Kinesis Analytics Output Data S3 Bucket
+    Default: device-analytic-data-output
+    Type: String
+  LamdaCodeUriBucket:
+    Description: S3 Bucket where the lambda function package is stored
+    Type: String
+    Default: mah-lambda-code-package
+  CodeKeyKinesisAnalyticsOutputToSNSFunc:
+    Description: S3 Bucket Key
+    Type: String
+    Default: RealTimeAnalytics/Source/kinesisAnalyticsOutputToSNS.zip
+  CodeKeyKinesisAnalyticsHelperFunc:
+    Description: Helper function to Describe and Start KinesisAnalyticsApplication
+    Type: String
+    Default: RealTimeAnalytics/Source/KinesisAnalyticsHelper.zip
+  InputDeliveryStreamName:
+    Description: Kinesis Firehose Delivery Stream Name
+    Type: String
+    Default: DeviceDataInputDeliveryStream
+  OutputDeliveryStreamName:
+    Description: Kinesis Firehose Delivery Stream Name
+    Type: String
+    Default: DeviceDataOutputDeliveryStream
+  KinesisAnalyticsIAMRoleName:
+    Description: IAM Role Name for the Rolethat Kinesis Analytics will Assume
+    Type: String
+    Default: DeviceDateKinesisAnalyticsIAMRole
+  KinesisAnalyticsApplication:
+    Description: Kinesis Firehose Delivery Stream Name
+    Type: String
+    Default: DeviceDataAnalytics
+  AnomalyThresholdScore:
+    Description: Kinesis Firehose Delivery Stream Name
+    Type: Number
+    Default: 0.99
+  SNSNotificationTopicName:
+    Description: The SNS Topic where the function will publish the data
+    Type: String
+    Default: publishtomanufacturer
+  NotificationEmailAddress:
+    Description: The email address of the manufacturer where the SNS e-mail Notification will be sent
+    Default: Akhtar.Hossain0521@gmail.com
+    Type: String
+  FirehoseBufferSize:
+    Description: The size of the buffer, in MBs, that Kinesis Firehose uses for incoming data before delivering it to the destination.
+    Type: Number
+    Default: '100'
+    MinValue: '1'
+    MaxValue: '128'
+    ConstraintDescription: must be between 1 and 128
+  FirehoseBufferInterval:
+    Description: The length of time, in seconds, that Kinesis Firehose buffers incoming data
+      before delivering it to the destination.
+    Type: Number
+    Default: '300'
+    MinValue: '60'
+    MaxValue: '900'
+    ConstraintDescription: must be between 60 and 900
+#----------------------------------------------------------------	
+Resources:
+
+  RealTimeAnalyticsOutputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Ref ProcessedDataBucketName
+      AccessControl: Private
+
+  InputDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Ref InputDeliveryStreamName
+      DeliveryStreamType: 'DirectPut'
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt [FirehoseDeliveryRole, Arn]
+        BucketARN: !GetAtt [RealTimeAnalyticsOutputBucket, Arn]
+        Prefix: 'original/'
+        BufferingHints:
+          SizeInMBs: !Ref FirehoseBufferSize
+          IntervalInSeconds: !Ref FirehoseBufferInterval
+        CompressionFormat: 'GZIP'
+
+  KinesisAnalyticsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Ref KinesisAnalyticsIAMRoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kinesisanalytics.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: Open
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:DescribeDeliveryStream
+                  - firehose:Get*
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource:
+                  - !GetAtt InputDeliveryStream.Arn
+                  - !GetAtt OutputDeliveryStream.Arn
+
+  FirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - firehose.amazonaws.com
+          Action:
+          - sts:AssumeRole
+          Condition:
+            StringEquals:
+              sts:ExternalId: !Ref 'AWS::AccountId'
+
+  LambdaFunctionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kinesisanalytics.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: AWSLambdaFunctionInvoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !GetAtt KinesisAnalyticsOutputToSNSFunc.Arn
+
+  KinesisAnalyticsOutputToSNSFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: KinesisAnalyticsOutputToSNS
+      Handler: kinesisAnalyticsOutputToSNS.notify_manufacturer
+      Runtime: python2.7
+      CodeUri: 
+        Bucket: !Ref LamdaCodeUriBucket
+        Key: !Ref CodeKeyKinesisAnalyticsOutputToSNSFunc
+      Description: KinesisAnalyticsOutputToSNSFunction publishes to SNS Topic for a threshold anomaly score
+      MemorySize: 1536
+      Timeout: 300
+      Policies:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${SNSNotificationTopicName}'
+          ANOMALY_THRESHOLD_SCORE: !Ref AnomalyThresholdScore
+
+  KinesisAnalyticsHelperFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: KinesisAnalyticsHelper
+      Handler: "KinesisAnalyticsHelper::KinesisAnalyticsHelper.StarterApp::KinesisAnalyticsAppStart"
+      Runtime: dotnetcore2.1
+      CodeUri: 
+        Bucket: !Ref LamdaCodeUriBucket
+        Key: !Ref CodeKeyKinesisAnalyticsHelperFunc
+      Description: KinesisAnalyticsHelper Starts the KinesisAnalytics Application
+      MemorySize: 1536
+      Timeout: 300
+      Policies:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonKinesisAnalyticsFullAccess
+      Environment:
+        Variables:
+          LAMBDA_NET_SERIALIZER_DEBUG: true
+
+  KinesisAnalyticsAppStarter:
+    Type: Custom::InvokeLambdaFunc
+    DependsOn: AnalyzeDeviceDataAppLambdaOutput
+    Properties:
+      ServiceToken: !GetAtt KinesisAnalyticsHelperFunc.Arn
+      ApplicationName: !Ref KinesisAnalyticsApplication
+      CustomResourceAction: StartKinesisApplication
+
+  AnalyzeDeviceDataApp:
+     Type: "AWS::KinesisAnalytics::Application"
+     Properties:
+       ApplicationName: !Ref KinesisAnalyticsApplication
+       ApplicationDescription: !Ref KinesisAnalyticsApplication
+       ApplicationCode: !Sub |
+         -- Compute an anomaly score for each record in the source stream using Random Cut Forest
+         -- Creates a temporary stream and defines a schema
+         CREATE OR REPLACE STREAM "DESTINATION_SQL_STREAM_001" (
+             "device_id"       VARCHAR(16),
+             "manufacturer"    VARCHAR(16),
+             "model"           VARCHAR(16),
+             "temperature"     integer,
+             "pulse"           integer,
+             "oxygen_percent"  integer,
+             "systolic"        integer,
+             "diastolic"       integer,
+             "ANOMALY_SCORE"   DOUBLE
+         );
+         -- Compute an anomaly score for each record in the source stream
+         -- using Random Cut Forest
+         CREATE OR REPLACE PUMP "STREAM_PUMP" AS 
+         INSERT INTO "DESTINATION_SQL_STREAM_001"
+         SELECT STREAM
+               "device_id", 
+               "manufacturer", 
+               "model", 
+               "temperature", 
+               "pulse", 
+               "oxygen_percent", 
+               "systolic", 
+               "diastolic", 
+               "ANOMALY_SCORE" 
+         FROM 
+         TABLE(RANDOM_CUT_FOREST(
+             CURSOR(SELECT STREAM 
+                 "device_id", 
+                 "manufacturer", 
+                 "model", 
+                 "temperature", 
+                 "pulse", 
+                 "oxygen_percent", 
+                 "systolic", 
+                 "diastolic"
+             FROM "SOURCE_SQL_STREAM_001")
+           )
+         );
+
+         CREATE OR REPLACE STREAM "DESTINATION_SQL_STREAM_002" (
+               "device_id"       VARCHAR(16),
+               "manufacturer"    VARCHAR(16),
+               "model"           VARCHAR(16),
+               "temperature"     integer,
+               "pulse"           integer,
+               "oxygen_percent"  integer,
+               "systolic"        integer,
+               "diastolic"       integer,
+               "ANOMALY_SCORE"   DOUBLE
+         );
+
+         CREATE OR REPLACE PUMP "STREAM_PUMP_2" AS 
+         INSERT INTO "DESTINATION_SQL_STREAM_002"
+         SELECT STREAM *
+         FROM "DESTINATION_SQL_STREAM_001";
+
+       Inputs:
+         - NamePrefix: SOURCE_SQL_STREAM
+           InputSchema:
+             RecordColumns:
+               - Name: device_id
+                 SqlType: VARCHAR(16)
+                 Mapping: $.device_id
+               - Name: patient_id
+                 SqlType: VARCHAR(16)
+                 Mapping: $.patient_id
+               - Name: temperature
+                 SqlType: INTEGER
+                 Mapping: $.temperature
+               - Name: pulse
+                 SqlType: INTEGER
+                 Mapping: $.pulse
+               - Name: oxygen_percent
+                 SqlType: INTEGER
+                 Mapping: $.oxygen_percent
+               - Name: systolic
+                 SqlType: INTEGER
+                 Mapping: $.systolic
+               - Name: diastolic
+                 SqlType: INTEGER
+                 Mapping: $.diastolic
+               - Name: manufacturer
+                 SqlType: VARCHAR(16)
+                 Mapping: $.manufacturer
+               - Name: model
+                 SqlType: VARCHAR(16)
+                 Mapping: $.model
+             RecordFormat:
+               RecordFormatType: JSON
+               MappingParameters:
+                 JSONMappingParameters:
+                   RecordRowPath: $
+           KinesisFirehoseInput:
+             ResourceARN: !GetAtt InputDeliveryStream.Arn
+             RoleARN: !GetAtt KinesisAnalyticsRole.Arn
+
+  AnalyzeDeviceDataAppLambdaOutput:
+     Type: "AWS::KinesisAnalytics::ApplicationOutput"
+     DependsOn: AnalyzeDeviceDataApp
+     Properties:
+       ApplicationName: !Ref KinesisAnalyticsApplication
+       Output:
+         Name: "DESTINATION_SQL_STREAM_001"
+         DestinationSchema: 
+           RecordFormatType: JSON
+         LambdaOutput:
+           ResourceARN: !GetAtt KinesisAnalyticsOutputToSNSFunc.Arn
+           RoleARN: !GetAtt LambdaFunctionRole.Arn
+
+  OutputDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Ref OutputDeliveryStreamName
+      DeliveryStreamType: 'DirectPut'
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt [FirehoseDeliveryRole, Arn]
+        BucketARN: !GetAtt [RealTimeAnalyticsOutputBucket, Arn]
+        Prefix: 'original/'
+        BufferingHints:
+          SizeInMBs: !Ref FirehoseBufferSize
+          IntervalInSeconds: !Ref FirehoseBufferInterval
+        CompressionFormat: 'GZIP'
+
+  SNSNotificationTopic:
+    Type: "AWS::SNS::Topic"
+    Properties:
+      TopicName: !Ref SNSNotificationTopicName
+      DisplayName: !Ref SNSNotificationTopicName
+      Subscription:
+        -
+          Endpoint: !Ref NotificationEmailAddress
+          Protocol: email
